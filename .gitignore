@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Cấu hình môi trường ảo
+
+.venv/
+
+# Thông tin cài đặt của IDE
+.vscode/
+.idea/

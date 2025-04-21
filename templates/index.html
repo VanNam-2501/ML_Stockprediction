@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dự đoán Giá Cổ phiếu</title>
+    <!-- Include Chart.js library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Include the date adapter for Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <style>
+        /* Prevent scrolling and set full height */
+        html, body {
+            height: 100%; /* Đảm bảo html và body chiếm toàn bộ chiều cao viewport */
+            overflow: hidden; /* Quan trọng: Ẩn thanh cuộn và ngăn cuộn */
+            margin: 0; /* Reset margin mặc định */
+            padding: 0; /* Reset padding mặc định */
+            font-family: sans-serif; /* Áp dụng font chữ cơ bản */
+        }
+
+        /* Main container styling */
+        .container {
+            max-width: 900px; /* Giới hạn chiều rộng tối đa */
+            margin: auto; /* Căn giữa container */
+            padding: 20px; /* Thêm khoảng đệm bên trong container */
+            height: 100vh; /* Cho container chiếm toàn bộ chiều cao nhìn thấy */
+            box-sizing: border-box; /* Đảm bảo padding không làm tăng kích thước */
+            display: flex; /* Sử dụng flexbox để sắp xếp */
+            flex-direction: column; /* Sắp xếp các phần tử con theo chiều dọc */
+        }
+
+        /* Controls section styling */
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0; /* Ngăn phần controls bị co lại */
+        }
+
+        /* Prediction result text styling */
+        #predictionResult {
+            margin-top: 15px;
+            margin-bottom: 15px; /* Thêm khoảng cách dưới kết quả */
+            font-weight: bold;
+            flex-shrink: 0; /* Ngăn phần text kết quả bị co lại */
+            min-height: 1.2em; /* Giữ chỗ trống tối thiểu ngay cả khi rỗng */
+        }
+
+        /* Loading and error message styling */
+        #loading { display: none; color: blue; margin-left: 10px;}
+        #error { display: none; color: red; margin-left: 10px;}
+
+        /* Chart container styling */
+        .chart-container {
+             flex-grow: 1; /* Cho phép container biểu đồ chiếm không gian còn lại */
+             position: relative; /* Cần thiết để định vị canvas con tuyệt đối */
+             min-height: 300px; /* Đảm bảo chiều cao tối thiểu cho biểu đồ */
+             border: 1px solid #ccc; /* Tùy chọn: thêm viền quanh khu vực biểu đồ */
+        }
+
+        /* Canvas styling */
+        canvas {
+            position: absolute; /* Định vị canvas theo chart-container */
+            top: 0;
+            left: 0;
+            width: 100%; /* Cho canvas lấp đầy chiều rộng container */
+            height: 100%; /* Cho canvas lấp đầy chiều cao container */
+        }
+    </style>
+</head>
+<body>
+    <!-- Main content container -->
+    <div class="container">
+        <h1>Dự đoán Giá Cổ phiếu (SGD Regressor)</h1>
+
+        <!-- Controls for stock selection and prediction -->
+        <div class="controls">
+            <label for="stockSymbol">Chọn mã cổ phiếu:</label>
+            <select id="stockSymbol">
+                <option value="">Đang tải...</option>
+            </select>
+            <button id="predictButton">Dự đoán</button>
+            <span id="loading">Đang xử lý...</span>
+            <span id="error"></span>
+        </div>
+
+        <!-- Area to display the prediction result text -->
+        <div id="predictionResult"></div>
+
+        <!-- Container specifically for the chart canvas -->
+        <div class="chart-container">
+            <canvas id="priceChart"></canvas>
+        </div>
+    </div>
+
+    <!-- JavaScript section -->
+    <script>
+        // Get references to HTML elements
+        const stockSelect = document.getElementById('stockSymbol');
+        const predictButton = document.getElementById('predictButton');
+        const predictionResultDiv = document.getElementById('predictionResult');
+        const loadingSpan = document.getElementById('loading');
+        const errorSpan = document.getElementById('error');
+        const ctx = document.getElementById('priceChart').getContext('2d');
+        let priceChart = null; // Variable to hold the chart instance
+
+        // Function to display error messages
+        function showError(message) {
+            errorSpan.textContent = `Lỗi: ${message}`;
+            errorSpan.style.display = 'inline';
+            loadingSpan.style.display = 'none';
+            predictionResultDiv.textContent = ''; // Clear old results
+        }
+
+        // Function to hide loading/error messages
+        function hideMessages() {
+            loadingSpan.style.display = 'none';
+            errorSpan.style.display = 'none';
+            errorSpan.textContent = '';
+        }
+
+        // 1. Load the list of available stocks on page load
+        async function loadStockList() {
+            hideMessages();
+            try {
+                const response = await fetch('/api/stocks/'); // Fetch from the FastAPI endpoint
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const stocks = await response.json();
+
+                stockSelect.innerHTML = '<option value="">-- Chọn mã --</option>'; // Clear "Loading..." option
+                if (stocks && stocks.length > 0) {
+                    stocks.forEach(stock => {
+                        const option = document.createElement('option');
+                        option.value = stock;
+                        option.textContent = stock;
+                        stockSelect.appendChild(option);
+                    });
+                    predictButton.disabled = false; // Enable button once list is loaded
+                } else {
+                    showError("Không có mã cổ phiếu nào được hỗ trợ.");
+                    predictButton.disabled = true;
+                }
+            } catch (error) {
+                console.error('Error fetching stock list:', error);
+                showError(`Không thể tải danh sách cổ phiếu. ${error.message}`);
+                predictButton.disabled = true;
+            }
+        }
+
+        // 2. Function to update or create the chart
+        function updateChart(historicalData, predictionData) {
+            // Destroy the previous chart instance if it exists
+            if (priceChart) {
+                priceChart.destroy();
+            }
+
+            // Default message if no data
+            let resultText = 'Chọn mã cổ phiếu và nhấn Dự đoán.';
+            let chartLabels = [];
+            let chartDatasets = [];
+
+            // Prepare historical data for the chart
+            if (historicalData && historicalData.timestamps && historicalData.prices && historicalData.timestamps.length > 0) {
+                chartLabels = historicalData.timestamps.map(ts => new Date(ts));
+                const actualPrices = historicalData.prices;
+
+                chartDatasets.push({
+                    label: 'Giá đóng cửa thực tế',
+                    data: actualPrices,
+                    borderColor: 'rgb(75, 192, 192)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.1)', // Optional fill
+                    tension: 0.1, // Slight curve to the line
+                    pointRadius: 2,
+                    borderWidth: 1.5
+                });
+                 resultText = ''; // Clear default message if we have history
+            } else {
+                 console.warn("Dữ liệu lịch sử không hợp lệ hoặc rỗng.");
+            }
+
+            // Prepare prediction data and add it to the chart
+            if (predictionData && predictionData.prediction_timestamp && predictionData.predicted_price !== null) {
+                const predictionTs = new Date(predictionData.prediction_timestamp);
+                const predictedPrice = predictionData.predicted_price;
+
+                // Find the correct position to insert the prediction timestamp
+                let insertIndex = chartLabels.findIndex(label => label >= predictionTs);
+
+                // Prepare data for the prediction point dataset (mostly nulls)
+                const predictionPointData = new Array(chartLabels.length).fill(null);
+
+                if (insertIndex === -1) { // Prediction is after all historical data
+                    chartLabels.push(predictionTs);
+                    // Add null to historical data at the prediction point
+                    if (chartDatasets.length > 0 && chartDatasets[0].data) {
+                         chartDatasets[0].data.push(null);
+                    }
+                    predictionPointData.push(predictedPrice); // Add prediction price at the end
+                    insertIndex = chartLabels.length - 1; // Update insert index
+                } else if (chartLabels[insertIndex].getTime() !== predictionTs.getTime()) { // Insert between existing points
+                    chartLabels.splice(insertIndex, 0, predictionTs);
+                     // Add null to historical data at the prediction point
+                    if (chartDatasets.length > 0 && chartDatasets[0].data) {
+                        chartDatasets[0].data.splice(insertIndex, 0, null);
+                    }
+                    predictionPointData.splice(insertIndex, 0, predictedPrice); // Insert prediction price
+                } else { // Timestamp already exists (unlikely but possible)
+                    predictionPointData[insertIndex] = predictedPrice; // Set prediction price at existing index
+                }
+
+
+                // Add the prediction dataset
+                chartDatasets.push({
+                    label: 'Giá dự đoán',
+                    data: predictionPointData, // Use the prepared array with mostly nulls
+                    borderColor: 'rgb(255, 99, 132)',
+                    backgroundColor: 'rgb(255, 99, 132)',
+                    pointRadius: 6, // Make prediction point larger
+                    pointHoverRadius: 8,
+                    showLine: false // Only show the point, not a line connecting nulls
+                });
+
+                // Update the result text
+                resultText = `Dự đoán cho ${predictionData.symbol}: ${predictedPrice.toFixed(2)} lúc ${predictionTs.toLocaleString('vi-VN')}`;
+                // Add last actual price for comparison if available
+                if (predictionData.last_actual_price !== null && predictionData.last_actual_timestamp !== null) {
+                    resultText += ` (Giá TT cuối: ${predictionData.last_actual_price.toFixed(2)} lúc ${new Date(predictionData.last_actual_timestamp).toLocaleString('vi-VN')})`;
+                }
+            } else if (historicalData) { // If we have history but no prediction yet (e.g., initial load or error during prediction)
+                 resultText = `Hiển thị dữ liệu lịch sử cho ${historicalData.symbol}.`;
+                 if (historicalData.last_actual_price !== null && historicalData.last_actual_timestamp !== null) {
+                    resultText += ` Giá cuối: ${historicalData.last_actual_price.toFixed(2)} lúc ${new Date(historicalData.last_actual_timestamp).toLocaleString('vi-VN')}`;
+                 }
+            }
+
+            // Display the result text
+            predictionResultDiv.textContent = resultText;
+
+
+            // Create the new chart instance
+            priceChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: chartLabels, // Use the potentially modified labels array
+                    datasets: chartDatasets
+                },
+                options: {
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'minute', // Adjust unit based on data frequency (e.g., 'day', 'hour')
+                                tooltipFormat: 'PPpp', // Format for tooltips (e.g., Feb 1, 2024, 2:30:00 PM)
+                                displayFormats: {
+                                    // Define formats for different time units on the axis
+                                    // minute: 'HH:mm dd/MM/yy' // Example with year
+                                    minute: 'HH:mm dd/MM'
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: 'Thời gian'
+                            },
+                            ticks: {
+                                source: 'auto', // Let Chart.js decide the number of ticks
+                                maxRotation: 45, // Rotate labels for better readability if needed
+                                minRotation: 45
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Giá'
+                            },
+                            beginAtZero: false // Don't force the y-axis to start at 0, better for price charts
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            mode: 'index', // Show tooltips for all datasets at the same x-index
+                            intersect: false // Tooltip appears even if not directly hovering over a point
+                        },
+                        legend: {
+                            position: 'top', // Position the legend at the top
+                        },
+                    },
+                    responsive: true, // Make the chart responsive to container size changes
+                    maintainAspectRatio: false // IMPORTANT: Allow chart to resize freely within its container
+                }
+            });
+        }
+
+
+        // 3. Handle the predict button click event
+        predictButton.addEventListener('click', async () => {
+            const selectedSymbol = stockSelect.value;
+            if (!selectedSymbol) {
+                showError("Vui lòng chọn một mã cổ phiếu.");
+                return;
+            }
+
+            hideMessages();
+            loadingSpan.style.display = 'inline';
+            predictionResultDiv.textContent = ''; // Clear previous result text
+            // updateChart will handle destroying the old chart
+
+            try {
+                // Fetch prediction and history data from the API
+                const response = await fetch(`/api/predict/${selectedSymbol}`);
+                if (!response.ok) {
+                    let errorDetail = `HTTP error! status: ${response.status}`;
+                    try {
+                        // Try to get more specific error message from API response body
+                        const errorData = await response.json();
+                        errorDetail = errorData.detail || errorDetail;
+                    } catch (e) { /* Ignore if response body is not JSON */ }
+                    throw new Error(errorDetail);
+                }
+                const result = await response.json();
+
+                // Update the chart and display results
+                updateChart(result.history, result.prediction);
+
+            } catch (error) {
+                console.error('Error fetching prediction:', error);
+                showError(`Không thể lấy dự đoán. ${error.message}`);
+                // Decide how to handle the chart on error:
+                // Option 1: Clear the chart
+                // updateChart(null, null);
+                // Option 2: Leave the old chart (if any) - current behavior
+            } finally {
+                loadingSpan.style.display = 'none'; // Hide loading indicator regardless of success/failure
+            }
+        });
+
+        // Run initialization code when the DOM is fully loaded
+        document.addEventListener('DOMContentLoaded', () => {
+            predictButton.disabled = true; // Disable button initially
+            loadStockList(); // Load the stock list
+            updateChart(null, null); // Initialize an empty chart with default message
+        });
+
+    </script>
+</body>
+</html>
